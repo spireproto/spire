@@ -1,0 +1,28 @@
+name: docs
+
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: every relative link resolves
+        run: |
+          fail=0
+          for f in README.md docs/*.md; do
+            grep -oE '\]\(([^)#:]+\.md)' "$f" | sed 's/^](//' | while read -r link; do
+              target="$(dirname "$f")/$link"
+              [ -f "$target" ] || { echo "broken: $f -> $link"; exit 1; }
+            done || fail=1
+          done
+          exit $fail
+      - name: no page is a stub
+        run: |
+          for f in docs/*.md; do
+            words=$(wc -w < "$f")
+            [ "$words" -ge 150 ] || { echo "too thin: $f ($words words)"; exit 1; }
+          done
+      - run: echo "docs ok"
