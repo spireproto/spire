@@ -13,7 +13,7 @@ waterfall fixed before anyone defaults.
 [![Deployed](https://img.shields.io/badge/deployed-nothing%20yet-CCE624?style=flat-square&labelColor=050403)](docs/status.md)
 [![Custody](https://img.shields.io/badge/custody-none-CCE624?style=flat-square&labelColor=050403)](docs/solvency.md)
 
-[spireproto.xyz](https://spireproto.xyz) · [Docs](https://spireproto.xyz/docs) · [@spireproto](https://x.com/spireproto)
+[spireproto.xyz](https://spireproto.xyz) · [Docs](https://spireproto.xyz/docs) · [@spire_proto](https://x.com/spire_proto)
 
 </div>
 
