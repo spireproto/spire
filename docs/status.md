@@ -7,7 +7,7 @@ integration. Nothing on this page is a roadmap promise.
 
 | | |
 | --- | --- |
-| Specification | ✅ this repository, and [spireproto.xyz/docs](https://spireproto.xyz/docs) |
+| Specification | ✅ twenty pages, the same in this repository and at [spireproto.xyz/docs](https://spireproto.xyz/docs) |
 | Clearing arithmetic, tested | ✅ [spire-core](https://github.com/spireproto/spire-core), 55 tests, zero dependencies |
 | Client and EIP-712 signing | ✅ [spire-sdk](https://github.com/spireproto/spire-sdk), 27 tests, works offline |
 | On-chain interfaces | ✅ [spire-contracts](https://github.com/spireproto/spire-contracts), published ahead of deployment |

@@ -71,19 +71,53 @@ numbers and the code ever drift apart, the suite fails before the docs do.
 
 ## Documentation
 
+The same twenty pages as [spireproto.xyz/docs](https://spireproto.xyz/docs), from
+the same source. The site renders them with search and navigation; here they are
+markdown you can read in a diff, and the figures are mermaid rather than SVG.
+
+**Start**
+
 | | |
 | --- | --- |
 | [Overview](docs/overview.md) | What a clearing layer is for, and what this one is not |
+| [Quickstart](docs/quickstart.md) | Zero to a novated obligation |
+| [Integration](docs/integration.md) | What a venue sends and reads |
+
+**Mechanics**
+
+| | |
+| --- | --- |
 | [Novation](docs/novation.md) | The step, and the four checks that precede it |
 | [Netting](docs/netting.md) | The window, the arithmetic, and what compression really depends on |
 | [Collateral](docs/collateral.md) | Haircuts, limits, margin calls |
 | [Default waterfall](docs/default-waterfall.md) | Five layers, two worked defaults, the timeline |
 | [Solvency](docs/solvency.md) | Checking the layer without asking us |
+
+**Reference**
+
+| | |
+| --- | --- |
 | [Parameters](docs/parameters.md) | Every number, in one table |
-| [Integration](docs/integration.md) | What a venue sends and reads |
+| [Data model](docs/data-model.md) | The five objects that carry the lifecycle |
+| [API reference](docs/api-reference.md) | Every method the SDK exposes |
+| [HTTP API](docs/http-api.md) | The same surface without the SDK |
+| [Contracts](docs/contracts.md) | Interfaces, events, the EIP-712 domain |
+| [Errors](docs/errors.md) | Codes, and the edge cases worth designing for |
+| [Glossary](docs/glossary.md) | Terms as this protocol uses them |
+| [Changelog](docs/changelog.md) | What can change, and what breaks when it does |
+
+**Operate**
+
+| | |
+| --- | --- |
 | [Membership](docs/membership.md) | Who the member is, and what it costs |
 | [Operations](docs/operations.md) | What the ten minute cure period means for staffing |
-| [Glossary](docs/glossary.md) | Terms as this protocol uses them |
+
+**Other**
+
+| | |
+| --- | --- |
+| [Token](docs/token.md) | What SPIRE is a claim on, and what it is not |
 | [Status](docs/status.md) | What exists and what does not |
 
 ## Repositories
