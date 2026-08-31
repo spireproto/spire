@@ -1,102 +1,117 @@
 # Integration
 
-What a venue actually builds. The short version: you send one signed message per
-fill and you read one event per window.
+A venue integrates at one point in its flow: the moment a trade is matched. Everything
+before that point stays yours, and everything after it becomes an obligation against Spire
+Protocol.
+
+For a runnable path, start with [Quickstart](quickstart.md). This page is what to decide
+before going live. The transport is described in [HTTP API](http-api.md).
 
 ## What you send
 
+A signed fill: the two participants, the asset, size, price and the venue's own identifier.
+The signature is what lets us attribute the fill and reject replays.
+
+## What you get back
+
+A signed obligation: the novated claim, the settlement window it belongs to, and the
+current net for that participant in that asset.
+
+## Sketch
+
 ```js
-const { Clearing } = require('@spireproto/sdk');
+import { Clearing } from '@spireproto/sdk';
 
 const clearing = new Clearing({
-  venue:   process.env.SPIRE_VENUE_ID,
-  signer:  process.env.SPIRE_SIGNING_KEY,   // or an object with signTypedData
+  venue: process.env['SPIRE_VENUE_ID'],
+  signer: process.env['SPIRE_SIGNING_KEY'],
   chainId: 4663,
-  network: 'testnet',
 });
 
-const obligation = await clearing.obligations.fromFill({ fill, window: 'current' });
+async function main() {
+  const obligation = await clearing.obligations.fromFill({
+    fill: matchedFill,
+    window: 'current',
+  });
+
+  console.log(obligation.net);
+}
+
+main();
 ```
 
-A fill is `{ fillId, asset, buyer, seller, size, price, matchedAt }`. That is the
-whole write path in the normal case: one call, per fill, at match time. You are
-not asked what your order book looked like, why the trade happened, or who your
-users are.
+The package name above is the intended one. It is not published yet, and this repository
+does not ship an implementation.
 
-Or without the SDK, since everything it sends is a request you could make
-yourself:
+## Lifecycle states
 
-```bash
-curl -X POST https://api.spireproto.xyz/v1/fills \
-  -H "X-Spire-Venue: $SPIRE_VENUE_ID" \
-  -H "X-Spire-Signature: $SIG" \
-  -H "Content-Type: application/json" \
-  -d '{"fillId":"v7-9f31c2","asset":"0xA1c...","buyer":"0xBd4...","seller":"0x39e...",
-       "size":"250000000000000000000","price":"187420000","matchedAt":1774483200,"window":"current"}'
-```
+`matched` -> `novated` -> `netted` -> `settled`
 
-## What you read
+`defaulted` is reachable from `novated` and `netted`, and routes into the
+[default waterfall](default-waterfall.md).
 
-| Event | Why you care |
-| --- | --- |
-| `window.finalised` | The nets are published. This is what your members have to deliver. |
-| `margin.call` | One of your members has 600 seconds. If you carry the member relationship, this is your alert, not theirs. |
-| `obligation.settled` | Terminal. Close the row. |
-| `member.defaulted` | Somebody's cure expired. If it is not your member, the answer is to do nothing. |
+## What a venue has to decide
 
-Delivery is at-least-once, so deduplicate on `obligationId` or on
-`(member, windowId)`.
+1. Which assets to clear. Clearing is per asset, not per venue.
+2. Whether to clear every fill or only fills above a size threshold.
+3. Who posts collateral: the venue on behalf of its users, or the users directly.
 
-## The three failures worth designing for
+That third decision is the one with consequences. It is covered below.
 
-**`SPIRE-4001`, window finalising.** Not an outage: a thirty second door closing.
-Retry once and the fill lands in the next window at the same price. Any venue
-that treats this as an error will page somebody 288 times a day.
+## Who posts the collateral
 
-**`SPIRE-3001`, limit breached.** A business condition. The right handling is
-usually upstream: refuse the order at the matcher rather than discovering it at
-novation. `err.business` is true for exactly this class.
-
-**`SPIRE-1003`, clock drift.** Your `matchedAt` is more than 60 seconds from
-chain time. This is a monitoring problem that presents as a clearing problem, and
-`node checks/chain.mjs` in
-[spire-checks](https://github.com/spireproto/spire-checks) tells you before it
-matters.
-
-## Who is the member
-
-Three models, and this is the decision that shapes your integration more than
-anything technical:
-
-| Model | Who posts collateral | Who gets the margin call |
+| | Venue posts | Users post |
 | --- | --- | --- |
-| Direct | Each end user | The end user |
-| Venue as member | The venue | The venue |
-| Hybrid | Venue for retail, direct for desks | Whoever posted |
+| Members from the protocol's view | One, the venue | Many |
+| Netting happens across | The venue's whole book | Each user separately |
+| Capital efficiency | Higher, one net per asset | Lower, one net per user per asset |
+| Who is margin called | The venue | The user |
+| Who carries user credit risk | The venue | Nobody, it is novated away |
 
-Most venues start as the member for their retail flow and let professional
-counterparties clear directly. It is the only model where a retail user is never
-woken up by a margin call they do not understand.
+A venue that posts on behalf of its users gets the best netting in the system, because every
+user's flow collapses into one position. It also takes back exactly the counterparty risk it
+came here to shed, this time against its own users.
 
-## Testing before there is anything to test against
+Most venues should start with users posting directly, and move to venue-posted collateral
+only for a known set of professional counterparties.
 
-The endpoint does not answer yet. What works today, offline and without a key:
+## Failure handling worth building
 
-```bash
-node examples/sign.js        # the exact digest and signature a fill produces
-node examples/integrate.js   # the whole path against a stub, including the retry
-node checks/netting.mjs my-fills.json   # what your own flow would net to
-```
+Three cases are worth explicit code rather than a generic retry.
 
-An integration can be written, signed and tested end to end against the published
-surface before a single contract is deployed. That is the reason for publishing
-the surface first.
+| Case | Code | Handling |
+| --- | --- | --- |
+| Window finalising | `SPIRE-4001` | Retry once, lands in the next window |
+| Limit breached | `SPIRE-3001` | Refuse the fill at your matcher, not after |
+| Asset not clearable | `SPIRE-1204` | Stop routing the asset, alert an operator |
 
-## Checklist
+`SPIRE-3001` is the one that shapes your architecture. If you check limits only when the
+obligation is rejected, you have already told a user their trade was matched. Read
+`positions.get` before you match, and treat the limit as a matching constraint rather than
+as a settlement error.
 
-- [ ] Sign fills with a key the protocol has on file, ideally held by a KMS
-- [ ] Handle `SPIRE-4001` with a single retry, not an alert
-- [ ] Reject over-limit orders at the matcher, not at novation
-- [ ] Monitor clock drift against chain time, not against NTP alone
-- [ ] Decide the membership model before you write the collateral UI
-- [ ] Subscribe to `window.finalised` and reconcile every window, not every day
+Full list in [Errors](errors.md).
+
+## Idempotency
+
+`fillId` is the idempotency key. Retrying with the same `fillId` and the same contents
+returns the original obligation. Retrying with the same `fillId` and different contents is
+`SPIRE-1004` and means two different trades share an identity somewhere upstream.
+
+Make `fillId` unique per matched trade, not per request. A retry is not a new trade.
+
+## Clocks
+
+`matchedAt` is your clock, and it is compared against chain time. More than 60 seconds of
+drift is `SPIRE-1003`. Run NTP on your matcher.
+
+## Going live
+
+1. Onboard, receive a `venueId` and a signing key.
+2. Run against testnet until a full window closes with a non-zero net.
+3. Confirm your handling of `SPIRE-4001` by sending a fill deliberately during finalisation.
+4. Agree the asset list and who posts collateral.
+5. Switch `network` to `mainnet`. Nothing else in the integration changes.
+
+Before that, decide who is the clearing member: see [Membership](membership.md). After it,
+the checklist in [Operations](operations.md) is what keeps you out of trouble.

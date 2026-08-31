@@ -1,101 +1,79 @@
 # Novation
 
-## The step
+Spire Protocol does not pass the trade along. It replaces it.
 
-A fill arrives. Buyer owes seller an amount of the settlement asset, seller owes
-buyer an amount of a tokenised equity. Both sides are exposed to each other for
-as long as that stands.
+A matched trade between A and B is discharged and two new obligations are written in its
+place: A owes Spire Protocol, and Spire Protocol owes B. The original bilateral link is gone.
 
-Novation discharges it. The original obligation is extinguished and two new ones
-are written in its place, both against Spire Protocol:
-
-```
-before        buyer  <------------------>  seller
-
-after         buyer  <----->  Spire  <----->  seller
-```
-
-This is not a guarantee sitting on top of a bilateral trade. It is a replacement
-of the trade. There is no residual claim between the two participants, and if one
-of them defaults the other never finds out, because there is nothing left
-connecting them.
-
-## Why it has to be a replacement
-
-A guarantee is a promise to pay if somebody else does not. It leaves the original
-claim intact, which means it leaves the original question intact: is the
-guarantor good for it, and for how many of these at once?
-
-Replacement removes the question rather than answering it. After novation there
-is exactly one counterparty in the market, and its solvency is
-[checkable](solvency.md) rather than assessable. That is the difference between a
-clearing house and an insurance policy, and it is why the first thing a clearing
-layer does is discharge, not promise.
-
-## What happens at the moment of novation
-
-Four things, in this order, before any state is written:
-
-1. **The signature is checked.** A fill is signed EIP-712 by the venue over the
-   domain `Spire Protocol / 1 / 4663`. If it does not recover to the venue key on
-   file, nothing happens: `SPIRE-1002`.
-2. **The clock is checked.** `matchedAt` more than 60 seconds from chain time is
-   `SPIRE-1003`. A venue with a drifting clock stops clearing before it notices
-   anything else is wrong.
-3. **The limit is checked.** The member's collateral buys a limit; if this fill
-   would exceed it the fill is refused with `SPIRE-3001` and no obligation
-   exists. This is the important one: it is much cheaper to refuse a fill than to
-   unwind a novated obligation.
-4. **The window is assigned.** The obligation belongs to exactly one settlement
-   [window](netting.md), decided here and never moved.
-
-Only then are the two obligations written, margin held, and `Novated` emitted
-once per side.
-
-## Independence
-
-The two obligations are independent from the moment they exist. The buyer's does
-not fail because the seller's does. Concretely:
-
-- One side defaults. The other settles normally against Spire Protocol and is
-  told nothing, because nothing about its position has changed. The loss goes to
-  the [waterfall](default-waterfall.md), not to the other participant.
-- One side's venue is suspended. The other's obligation is unaffected: the venue
-  was the messenger, not the counterparty.
-- Both sides are the same member, on two venues. The obligations still exist
-  separately and then net against each other, which is the ordinary case for a
-  market maker, not a special one.
-
-## Idempotency
-
-`fillId` is the idempotency key. Sending the same fill twice returns the
-obligation created the first time rather than creating a second one, and the
-signature is deterministic so a retry produces the same bytes.
-
-Reusing a `fillId` with *different* contents is `SPIRE-1004` and it is worth
-alerting on rather than retrying: it means two different trades were given one
-identity somewhere upstream, and no clearing layer can decide which one was meant.
-
-## What a venue gives up
-
-Visibility into the other side. After novation a venue can see its own members'
-obligations and nothing else, because the netting that follows crosses venue
-boundaries. A member that buys on one venue and sells the same asset on another
-inside one window delivers the difference, and neither venue can see that the
-other side exists.
-
-That is a feature for the member and a constraint for the venue, and it is worth
-saying out loud before an integration rather than after.
-
-## In the interfaces
-
-```solidity
-function novate(Fill calldata fill, bytes calldata signature)
-    external
-    returns (bytes32 obligationId);
+```mermaid
+flowchart TB
+    subgraph before["Before: each one prices the other"]
+        direction LR
+        B1["Buyer"] <--> S1["Seller"]
+    end
+    subgraph after["After novation"]
+        direction LR
+        B2["Buyer"] <--> SP["Spire Protocol"]
+        SP <--> S2["Seller"]
+    end
+    before ~~~ after
 ```
 
-`novate` reverts rather than returning an error, and each revert maps onto one
-published code: `SPIRE-3001` surfaces as `LimitExceeded(member, limit,
-attempted)`. Full surface in
-[spire-contracts](https://github.com/spireproto/spire-contracts).
+## Why it matters
+
+Before novation each participant has to answer a question about every counterparty it
+touches: can this one pay. That question is expensive, it does not scale across venues, and
+it is the reason bilateral markets stay small and clubby.
+
+After novation the question is asked once, about one counterparty, and that counterparty is
+collateralised and continuously provable.
+
+> You are no longer trading with a stranger. You are trading with collateral.
+
+## What happens in the call
+
+One request from the venue, and four things happen before it returns.
+
+| Step | Check | Failure |
+| --- | --- | --- |
+| 1 | Signature recovers to the venue key | `SPIRE-1002` |
+| 2 | Asset is clearable | `SPIRE-1204` |
+| 3 | Both members are onboarded and not in a call | `SPIRE-1205`, `SPIRE-3005` |
+| 4 | Neither side breaches its limit or concentration cap | `SPIRE-3001`, `SPIRE-3003` |
+
+Only after all four pass is the trade discharged and the obligations written. A fill that
+fails any check is refused while it is still only a message. Nothing is unwound, because
+nothing was created.
+
+## One fill, two obligations
+
+The two obligations are independent from the moment they exist.
+
+| | Buyer side | Seller side |
+| --- | --- | --- |
+| Owes | The cash leg | The asset leg |
+| Faces | Spire Protocol | Spire Protocol |
+| Margin held against | Its own net | Its own net |
+| Affected if the other defaults | No | No |
+
+That last row is the entire product. See [Default waterfall](default-waterfall.md) for what
+happens to the loss instead.
+
+## Consequences
+
+- **Anonymity between participants becomes safe.** Neither side needs to know who is on the
+  other end, because neither side is exposed to the other.
+- **Venues become interchangeable.** An obligation from venue X and an obligation from
+  venue Y are the same instrument once novated, so they can net against each other. This is
+  what makes cross-venue [netting](netting.md) possible at all.
+- **Risk concentrates on purpose.** All exposure lands on one balance sheet. That is the
+  point, and it is why the collateral rules and the waterfall are strict.
+
+## What has to be true for it to work
+
+1. The clearing entity is over-collateralised at all times, not on average. Checked every
+   window and published as a [solvency proof](solvency.md).
+2. Position limits bind before an obligation is accepted, not after. That is step 4 above.
+3. The order of loss absorption is fixed in advance and not subject to discretion.
+
+Fail any one of these and novation stops being risk transfer and becomes risk accumulation.

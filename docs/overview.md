@@ -1,89 +1,96 @@
 # Overview
 
-## What a clearing layer is for
+A trade reaches Spire Protocol already matched. Price discovery happened somewhere else and
+we do not touch it. What we take over is everything between the match and final settlement.
 
-Two participants agree on a price. That is a trade. Between the moment they agree
-and the moment the asset and the money change hands, each of them is holding a
-claim on the other, and each of them has to have formed a view on whether the
-other will be there when the time comes.
+## Lifecycle of an obligation
 
-Every mature market eventually decides that this view is not worth forming ten
-thousand times a day, and puts one counterparty in the middle. The bilateral
-trade is discharged and replaced by two obligations against that counterparty.
-Nobody has to price anybody else's solvency, and the market stops being a graph
-of mutual exposures and starts being a star.
+1. **Fill.** A venue posts a matched fill, signed, referencing both participants and the
+   asset. Nothing has moved yet.
+2. **Novation.** The trade is torn up and re-signed against Spire Protocol. The buyer owes
+   Spire Protocol, and Spire Protocol owes the seller. Two obligations replace one trade.
+3. **Limit check.** Each obligation is checked against the participant's position limit,
+   which is a function of the collateral they have staked.
+4. **Netting.** Inside the settlement window, obligations in the same asset collapse
+   against each other.
+5. **Settlement.** At the close of the window the net difference settles on chain. What
+   netted out never becomes a transaction.
+6. **Default, if it happens.** The obligation does not disappear. It is covered by the
+   waterfall, in order, and the counterparty on the other side is paid.
 
-That is clearing. It is not a settlement optimisation, it is a change in who
-faces whom.
+Steps 1 to 3 take one call. Steps 4 and 5 happen on the window clock without the venue
+doing anything. See [Quickstart](quickstart.md).
 
-## What tokenised equities did instead
+## The same lifecycle in one line
 
-On chain, the answer to counterparty risk was to remove the interval. Nothing is
-owed because everything is prefunded: the asset is in the account before the
-trade and the cash is in the account before the trade, and the transfer is the
-trade.
+```mermaid
+stateDiagram-v2
+    [*] --> matched: fill received
+    matched --> novated: signature verified, margin held
+    novated --> netted: window closed
+    netted --> settled: delivered on chain
+    novated --> defaulted: cure expired
+    netted --> defaulted: cure expired
+    settled --> [*]
+```
 
-This works, and it is the reason on-chain venues have never had a failed
-delivery. It also has a price, and the price is paid in capital that has to sit
-still. Every unit of turnover requires a unit of assets already in place, at that
-moment, in the right account.
+`defaulted` branches off `novated` and `netted`. Nothing else is reachable, and no state is
+ever revisited. Field-level detail is in [Data model](data-model.md).
 
-A market maker quoting both sides of five assets on three venues does not need
-capital equal to its net risk. It needs capital equal to the gross of everything
-it might trade, on every venue where it might trade it, at all times.
+## Where the writes happen
 
-## What Spire Protocol does
+This is the part that decides whether a clearing layer is worth having.
 
-Four mechanisms, none of them new. What is new is that they are being written for
-a chain that does not have them.
-
-| | |
+| Event | Chain writes |
 | --- | --- |
-| [Novation](novation.md) | The bilateral trade is discharged. Two obligations against the clearing layer take its place, and they are independent of each other from the moment they exist. |
-| [Netting in time](netting.md) | Obligations accumulate in a 300 second window and collapse against each other before anything reaches the chain. Per member, per asset, across venues. |
-| [Collateral](collateral.md) | Exposure is covered by margin against the net, not by prefunding the gross. A tier 1 position costs 8% of its notional to carry. |
-| [Default waterfall](default-waterfall.md) | Loss is absorbed in an order fixed before anyone defaults, and the most a stranger's failure can cost a member is bounded before it joins. |
+| A fill is novated | none |
+| A thousand fills are novated | none |
+| A window closes | one per member per asset, against the net |
+| A member defaults | one, plus the auction if it gets that far |
 
-Together they answer one question: how much capital does the market have to hold
-to support a given turnover? Prefunding answers "all of it". Clearing answers
-"the margin on what is left after everything cancels out".
+A venue doing ten thousand fills an hour in one asset for one member writes to the chain
+twelve times, once per five minute window, and each write carries only the difference.
 
-## The lifecycle
+## What the venue keeps and what it hands over
 
-```
-fill  ->  novated  ->  netted  ->  settled
-                 \
-                  ->  defaulted  ->  waterfall
-```
-
-A fill is a signed statement from a venue that two participants agreed. It is
-novated on arrival, which is where limits are checked and margin is held: a
-breach is refused before anything is owed, because refusing a fill is cheap and
-unwinding a novated obligation is not.
-
-At the close of its window the obligation is netted against everything else that
-member did in that asset. What is left is delivered inside 120 seconds. Nothing
-carries across a window boundary, and no state is ever revisited.
+| Stays with the venue | Moves to Spire Protocol |
+|---|---|
+| Price discovery, matching, the order book | Counterparty risk |
+| The user relationship | Collateral management |
+| Fee policy on its own side | Netting and settlement timing |
+| Listing decisions | Default handling |
 
 ## What this is not
 
-It is not a venue. Spire Protocol does not match, quote, or hold an order book,
-and it never sees why a fill happened. Venues compete on liquidity and product;
-the clearing layer underneath them is not a place anyone wants competition,
-because the whole benefit comes from everyone facing the same counterparty.
+- Not a venue. We do not quote, match or route.
+- Not a custodian of the venue's users.
+- Not a lending market. Collateral secures obligations, it is not lent out.
+- Not a bridge. The clearing layer is native to Robinhood Chain and does not run a second
+  deployment on another chain.
 
-It is not custody in the sense of an account you cannot see into. Collateral sits
-in a vault contract whose balances are public, and the
-[solvency proof](solvency.md) exists so the layer can be checked rather than
-believed.
+## Reading order
 
-It is not deployed. See [Status](status.md), which is deliberately blunt about
-what exists and what does not.
+If you are deciding whether this is useful, read [Novation](novation.md) and then
+[Netting](netting.md). Those two carry the argument.
 
-## Where to read next
+If you are deciding whether it is safe, read [Collateral](collateral.md),
+[Default waterfall](default-waterfall.md) and [Parameters](parameters.md). The third one is
+where the claims turn into numbers.
 
-- [Novation](novation.md) if you want the mechanism.
-- [Netting](netting.md) if you want the arithmetic that makes it worth doing.
-- [Parameters](parameters.md) if you want every number in one table.
-- [Integration](integration.md) if you are a venue and want to know what you send.
-- [Status](status.md) if you want to know what is real today.
+If you are integrating, go to [Quickstart](quickstart.md) and keep
+[API reference](api-reference.md) and [Errors](errors.md) open beside it.
+
+If you want to check the claims yourself rather than read about them, go straight to
+[Contracts](contracts.md). Every number on this site is a view call away.
+
+If you are already live and somebody is on call, [Operations](operations.md) is the page
+that should be open at three in the morning.
+
+## Running any of this
+
+The arithmetic on these pages is a package with tests:
+[spire-core](https://github.com/spireproto/spire-core). The on-chain surface is
+[spire-contracts](https://github.com/spireproto/spire-contracts), the client is
+[spire-sdk](https://github.com/spireproto/spire-sdk), and everything the docs
+claim about the chain can be re-measured with
+[spire-checks](https://github.com/spireproto/spire-checks).

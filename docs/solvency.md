@@ -1,72 +1,71 @@
-# Solvency, checkable
+# Settlement is closed. Solvency is not.
 
-## The problem with a closed settlement
+No serious participant settles where its book is visible to a competitor. Positions and
+flows are not published.
 
-Clearing works by putting one counterparty in the middle. That is also its
-failure mode: everyone's exposure is now to the same balance sheet, and if that
-balance sheet is a claim rather than a fact, the market has replaced many small
-questions with one large one.
+What leaves the system is a proof that collateral covers obligations, without revealing
+whose collateral it is or how large any position is.
 
-Traditional clearing houses answer this with regulation, audits and disclosure on
-a quarterly cadence. On chain there is a better answer available, and refusing to
-use it would be strange.
+## The two properties, separately
 
-## What is published
+- **Confidentiality.** Individual positions, sizes and counterparties stay closed.
+- **Verifiability.** The aggregate claim, that posted collateral covers outstanding
+  obligations, is checkable by anyone at any time.
 
-One commitment per closed window, over the collateral held and the margin
-required against it:
+These are not in tension. The proof is about the aggregate, not about the members.
 
-```solidity
-function proofOf(uint64 windowId)
-    external
-    view
-    returns (bytes32 commitment, uint256 collateral, uint256 required, uint64 publishedAt);
+## What the proof actually asserts
+
+One inequality, published every window, and readable onchain from `SolvencyRegistry`
+(see [Contracts](contracts.md)):
+
+```
+sum(haircutCollateral) >= sum(requiredMargin) + sum(defaultFund)
 ```
 
-The commitment is a merkle root over per member positions and collateral. A
-member can prove its own line against it without the rest of the book being
-disclosed, which matters: a proof that reveals every member's position is not a
-transparency feature, it is a leak with a nice name.
+Both sides are sums over every member. The proof commits to each member's contribution
+without opening it, then shows that the totals satisfy the inequality. An observer learns
+that the system is covered. They do not learn by how much any single member is covered, or
+how many members there are on either side of an asset.
 
-`coverageBps` is the aggregate, collateral over required margin. Under 10,000
-means the layer is short, and it is meant to be read by people who do not trust
-us.
+## What is published and what is not
 
-## Checking it without asking us
+| Published every window | Never published |
+| --- | --- |
+| The solvency proof | Individual positions |
+| Aggregate collateral value | Which member holds what |
+| Number of settled windows | Counterparty pairs |
+| Asset tiers and margin rates | A member's utilisation |
+| Default events, after the fact | The order book of any venue |
 
-Three view calls, no API, no permission:
+A member's own `utilisation` is readable by that member through
+[`positions.get`](api-reference.md), and by nobody else.
 
-1. `SolvencyRegistry.latestProof()` and check the commitment against the window
-   you care about.
-2. `CollateralVault.haircutValue()` summed over members, against the aggregate
-   required margin in `ClearingHouse`. These are independent contracts; if they
-   disagree, one of them is wrong and that is the finding.
-3. `Governor.timelockDelay()` is still 48 hours and no proposal is queued that you
-   have not seen.
+## Against the traditional baseline
 
-All three are reads. None of them requires trusting an endpoint, including ours.
-When there is a deployment,
-[spire-checks](https://github.com/spireproto/spire-checks) runs exactly these and
-prints the answer.
+A traditional clearing house publishes solvency on a quarterly cadence, audited after the
+fact, and participants take it on trust between reports. Continuous verifiable proof is a
+strictly stronger guarantee than a quarterly attestation, and it is the thing onchain
+infrastructure can offer that the incumbent structure cannot.
 
-## What the proof does not say
+The difference is not that the numbers are better. It is that the gap between claims shrinks
+from three months to five minutes, and the claim stops requiring trust in the party making
+it.
 
-It says the layer holds enough collateral against the margin it requires. It does
-not say the margin rates are high enough for the next gap, that the haircuts are
-conservative enough for the next illiquid morning, or that an auction will clear
-at the price the model assumed.
+## What a failed proof means
 
-Those are judgements, and a merkle root cannot launder a judgement into a fact.
-What the proof removes is the separate and much stupider risk of the numbers
-being misreported, which is the one failure mode that should not exist on a chain.
+If the inequality does not hold at a window close, the window does not settle. New novation
+stops, open obligations stay open, and the shortfall is resolved through margin calls before
+anything moves.
 
-## Why this is not optional
+A protocol that settles anyway and reconciles later is a protocol that has decided its own
+solvency claim is advisory.
 
-A clearing layer asks the market to concentrate its counterparty risk in one
-place. The only honest way to ask for that is to make the concentration
-inspectable at the same frequency the market trades at, not quarterly, and not
-through us.
+## What is deliberately not claimed
 
-Everything else in this repository, the interfaces published before deployment,
-the checks that run against our own claims, the honest [status](status.md) page,
-is the same idea applied to the things a merkle root cannot cover.
+- Not a claim that a proof removes the need for collateral. It does not. It shows the
+  collateral is there.
+- Not a claim of privacy against the protocol itself. The clearing layer necessarily knows
+  the obligations it novates.
+- Not a claim that confidentiality survives a default. A defaulting member's position
+  becomes visible when it reaches auction, because it has to be biddable.

@@ -1,74 +1,83 @@
-# Membership
+# Clearing membership
 
-## Who is the member
+A member is an address with posted collateral and a position limit. Members are onboarded
+once and clear across every venue, because after [novation](novation.md) an obligation from
+one venue is the same instrument as an obligation from another.
 
-The member is whoever posts collateral and whoever gets the margin call. Those
-two are the same address by construction, and deciding which one it is shapes a
-venue's product more than any technical choice in the integration.
+## Who needs to be a member
 
-| Model | Collateral | Margin call reaches | Fits |
-| --- | --- | --- | --- |
-| Direct | The end participant | The end participant | Desks, market makers, funds |
-| Venue as member | The venue | The venue | Retail flow |
-| Hybrid | Both, per counterparty | Whoever posted | Most venues in practice |
+Not everybody who trades. It depends on the decision described in
+[Integration](integration.md).
 
-A retail user woken at three in the morning by a margin call they did not know
-they could receive is a product failure, not a clearing one. Venues that carry
-retail flow should be the member for it and manage the exposure internally, which
-is exactly what a broker does off chain.
+| Model | Who is the member | Who is margin called |
+| --- | --- | --- |
+| Users post directly | Each end user | The user |
+| Venue posts for its users | The venue | The venue |
+| Hybrid | Venue for retail flow, professionals direct | Both, separately |
+
+A venue that posts on behalf of its users gets the best netting in the system and takes back
+its users' credit risk in exchange. Most start hybrid: users direct, and the venue's own
+market making desk as a separate member.
 
 ## Requirements
 
-| | |
-| --- | --- |
-| Minimum collateral | 250,000 USDC after haircuts |
-| Default fund contribution | 15% of required margin, floor 50,000 USDC |
-| Settlement address | Able to deliver a net inside 120 seconds |
-| Operational contact | Reachable inside the 600 second cure period |
+| Requirement | Value | Note |
+| --- | --- | --- |
+| Minimum collateral | 250,000 USDC | After haircuts |
+| Default fund contribution | 15% of required margin | Floor 50,000 USDC |
+| Address | One per member | Sub-accounts are derived, not separate members |
+| Clock | NTP synced | Fills more than 60s off chain time are rejected |
 
-The last one is not paperwork. A member whose only contact is an email address
-monitored on weekdays has no way to use the cure period, and the cure period is
-the difference between a margin call and a default.
+The default fund contribution is not a fee. It is capital at risk that is returned when the
+member exits, less anything consumed by a default. See [Default waterfall](default-waterfall.md).
 
 ## Onboarding
 
-1. **Register the address.** The member address, and the venue key if the member
-   is a venue.
-2. **Post collateral.** It counts after haircuts, so post the mix you intend to
-   keep rather than the one that looks largest.
-3. **Fund the default fund contribution.** Posted, not usable as margin.
-4. **Agree the assessment cap.** 2x the contribution per event. This is the only
-   number in the arrangement that is about somebody else's behaviour.
-5. **Test on testnet through a full window**, including a margin call and a
-   delivery, before the first mainnet fill.
+1. Submit the member address and the assets you intend to clear.
+2. Receive a `venueId` and a signing key if you are also a venue. A member that only trades
+   does not need one.
+3. Post collateral through `collateral.post` or `POST /v1/collateral/deposits`.
+4. Read `collateral.get(member)` and confirm `limit` is what you expect.
+5. Trade.
+
+Steps 3 to 5 are self-service. Step 1 is not, because somebody has to decide which assets a
+new member may clear.
 
 ## Sub-accounts
 
-A member may run sub-accounts, and they share the parent's collateral and limit.
-Netting runs through them: a member long in one sub-account and short in another
-in the same asset and window nets to the difference, which is the point of having
-them.
+A member may derive sub-accounts to separate strategies or desks.
 
-What sub-accounts do not do is isolate risk. A default is a member-level event.
-If separation matters, that is two members, not one member with two accounts, and
-the collateral floor applies twice.
+| Property | Behaviour |
+| --- | --- |
+| Collateral | Held at the member level, not per sub-account |
+| Position limit | Shared across sub-accounts |
+| Netting | Across the member, so sub-accounts net against each other |
+| Reporting | Per sub-account through the `member` filter |
+
+Two desks that trade opposite sides of the same asset in the same window will net to a
+smaller number than either of them expects. That is the intended behaviour and it is worth
+telling both desks before they see it in a report.
 
 ## What membership costs
 
-| Item | Amount | Returned |
+| | Amount | Recoverable |
 | --- | --- | --- |
-| Collateral | From 250,000 USDC | Yes, on exit |
-| Default fund contribution | 15% of margin, floor 50,000 | Yes, five days after exit |
-| Clearing fee | 0.35 bps of novated notional | No |
-| Assessment, if somebody defaults badly | Up to 2x the contribution | No |
+| Collateral | From 250,000 USDC | Yes, on withdrawal from `free` |
+| Default fund contribution | 15% of required margin | Yes, on exit, less losses absorbed |
+| Clearing fee | 0.35 bps of novated notional | No, it is a fee |
+| Worst case from somebody else's default | 2x your contribution | No |
 
-The five day delay on returning a contribution exists because a default the
-member was part of can surface after it leaves. A member that could exit on the
-morning of a stress event would be a member whose contribution meant nothing.
+That last row is the one to model before joining. It is bounded, it is knowable in advance,
+and it is the entire economic argument for the assessment cap existing at all.
 
-## Exit
+## Exiting
 
-Stop novating, let open windows settle, withdraw collateral once `free` covers
-it, and the fund contribution returns five days later. There is no notice period
-and no penalty: a clearing layer that makes leaving difficult is compensating for
-something else.
+1. Stop sending fills and let open obligations settle. There is no way to cancel a novated
+   obligation, only to let its window close.
+2. Withdraw collateral down to the level that supports remaining positions.
+3. Request removal. The default fund contribution is released after the replenishment
+   period, five days, so that a default occurring on your last day is still covered by the
+   capital that was standing behind it.
+
+Nothing about exiting is instant, and that is deliberate. A member that could withdraw its
+fund contribution the moment it smelled trouble would make the mutualised layer worthless.

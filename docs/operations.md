@@ -1,90 +1,136 @@
 # Operations
 
-The protocol's timings decide the staffing, not the other way round. This page is
-what that means in practice.
+Running against a clearing layer is not the same as running against a venue. The protocol
+has clocks, and those clocks decide your paging policy.
 
-## The budget
+## The clock that sets your on-call
 
-| Event | Clock |
-| --- | --- |
-| `free` goes negative, call issued | 0s |
-| Cure period ends | 600s |
-| Default declared | 600s |
-| Auction opens | 900s |
-| Auction closes | 1800s |
+```mermaid
+flowchart LR
+    MC["margin call<br/>free goes negative"] -->|"600s to cure"| D["default declared"]
+    D -->|"300s"| A["auction opens"]
+    A -->|"900s"| C["auction closes"]
+```
 
-Ten minutes from the call to the default. That is the entire budget for
-detection, decision and a confirmed transaction. If alerting takes four minutes
-to reach a human, six are left, and a human who has to look something up in a
-runbook they have never opened will use all six.
+The ten minutes before the default is declared is the whole budget: detection,
+decision, and a confirmed transaction. Nothing after it is yours to influence.
 
-Every operational decision below follows from that one number.
+`curesAt` is an absolute timestamp and it survives a window boundary. Ten minutes is the
+whole budget: detection, decision, and a transaction confirmed on chain. If your alert
+routing takes four of those minutes, you have six.
+
+Page a human on `margin.call`. Do not batch it into a digest.
 
 ## What to monitor
 
-| Signal | Threshold | Severity |
-| --- | --- | --- |
-| Clock drift against chain time | > 20s | page |
-| Fills rejected `SPIRE-1002` | any | page |
-| Fills rejected `SPIRE-4001` | > 5% of a window | warn |
-| Fills rejected `SPIRE-3001` | > 1% of a window | warn |
-| Member utilisation | > 85% of limit | warn |
-| Member `free` | < 0 | page |
-| Window not finalised | 60s past close | page |
-| Net not delivered | 30s before deadline | page |
-| Our own reconciliation delta | any non-zero | page |
-| Coverage ratio | < 10,500 bps | warn |
-| Insurance layer balance | < 2,000,000 USDC | warn |
+| Signal | Source | Alert when | Severity |
+| --- | --- | --- | --- |
+| `free` collateral | `collateral.get` | Below 15% of `haircutValue` | Warn |
+| `free` collateral | `collateral.get` | Negative | Page |
+| `utilisation` | `positions.get` | Above 8000 bps | Warn |
+| `utilisation` | `positions.get` | Above 9500 bps | Page |
+| Margin call | `margin.call` event | Any | Page |
+| Window state | `windows.current` | `settling` for more than 120s | Page |
+| Novation errors | `SPIRE-3001` rate | Any sustained rate | Page |
+| Novation errors | `SPIRE-4001` rate | Above 2% of fills | Warn |
+| Clock drift | Your NTP | Above 20s from chain time | Warn |
+| Websocket | Heartbeat | No frame for 40s | Warn, reconnect |
+| Rate limit | `429` responses | Any | Warn |
 
-Two of those are unusual and deliberate. `SPIRE-1002` at any rate is a page
-because a signature failure is either a key problem or an impersonation attempt,
-and neither improves by waiting. A non-zero reconciliation delta is a page even
-when it is small, because the size of the first delta says nothing about the size
-of the second.
+Two of these deserve comment.
+
+`SPIRE-3001` at any sustained rate means your matcher is not checking limits before it
+matches. Users are being told a trade happened and then finding out it did not clear. Read
+`positions.get` on the matching path.
+
+`SPIRE-4001` above a couple of percent means your fills are clustering at the window
+boundary. Harmless per fill, but it moves flow into the next window and changes the net you
+were expecting.
 
 ## Reconciliation
 
-Per window, not per day. For each closed window:
+Once per window, after `window.finalised`.
 
-1. Sum the obligations you sent against the positions the protocol published.
-2. Compare your expected net per member and asset against `netOf`.
-3. Compare the delivered amount against the published net.
+```js
+clearing.on('window.finalised', async ({ windowId }) => {
+  const positions = await clearing.positions.list({ windowId });
+  for (const p of positions) {
+    const local = ledger.netFor(p.member, p.asset, windowId);
+    if (local !== p.net) alert('net mismatch', { member: p.member, local, theirs: p.net });
+  }
+});
+```
 
-Three ordinary causes of a delta, in the order you should check them:
+A mismatch is almost always one of three things: a fill you sent and did not record, a fill
+that landed in the next window because of `SPIRE-4001`, or a sub-account you are netting
+separately while the protocol nets them together. Check in that order.
 
-- **A fill you sent during finalisation.** It is in the next window, not lost.
-  Your reconciliation is off by one window, not off by an amount.
-- **A member trading the same asset on another venue.** Netting crosses venues,
-  so the published net is smaller than the one you computed from your own book.
-  This is the system working.
-- **A cancelled order that your matcher counted and never sent.** This one is
-  yours, and it is the reason to reconcile against what you sent rather than
-  against what you intended to send.
+Do not reconcile against `gross`. Gross is informational; the number that has consequences
+is `net`.
 
 ## Runbooks
 
-**Your member is in a margin call.** Notify, then watch `curesAt`. Do not novate
-new notional for them: it is refused with `SPIRE-3005` anyway, and a queue of
-refused fills is a worse alert than the call itself.
+### Margin call
 
-**A window is not finalising.** `finalise` is permissionless. Call it yourself.
-That is not a workaround, it is the design.
+1. Confirm `free` is actually negative through `collateral.get`, not only from the event.
+2. Post collateral. This is faster than reducing, because reducing needs offsetting fills to
+   be matched, novated and netted, and there may not be liquidity.
+3. If you cannot post in time, reduce in the largest asset first. Concentration is what the
+   auction punishes.
+4. Confirm `free` is positive again before `curesAt`. The event does not fire twice.
 
-**Somebody else's member defaults.** Do nothing. Your obligations are independent
-and settle normally. If your monitoring pages you for this, tune it: an alert
-that fires when the system works as intended will be ignored when it does not.
+### A window will not settle
 
-**A venue is suspended, and it is yours.** Existing obligations stand and settle.
-Stop sending, work the suspension, and do not attempt to unwind positions the
-protocol still considers live.
+`state` stuck at `settling` past the deadline means somebody has not delivered, and it may
+be you.
 
-**Clock drift.** Fix the clock, not the fills. Retrying a fill with a corrected
-`matchedAt` is falsifying a trade record.
+1. Check your own net through `positions.list` and confirm delivery.
+2. Check the settlement asset allowance on the settlement contract. `SPIRE-5003` is an
+   allowance problem far more often than a balance problem.
+3. If your side is delivered, nothing further is required of you. A counterparty failure is
+   absorbed by the [waterfall](default-waterfall.md) and does not become your problem.
 
-## Before going live
+### Somebody else defaulted
 
-- [ ] Reconcile every window for two weeks on testnet with zero unexplained deltas
-- [ ] Alert on clock drift and prove the alert reaches a human in under 90 seconds
-- [ ] Rehearse a margin call end to end, including the part where somebody posts
-- [ ] Confirm nobody is paged for another member's default
-- [ ] Have the key custody answer written down before the first mainnet fill
+Nothing. That is the answer, and it is the product.
+
+Your obligations face Spire Protocol, not the defaulter, so they settle normally. You may
+see an `Absorbed` event reaching layer four, which means the mutualised fund was touched and
+you will be assessed up to twice your contribution. That assessment appears as a reduction
+in your default fund balance, not as a margin call.
+
+### Your venue was suspended
+
+`SPIRE-2002` on every fill. Stop routing, do not retry, and contact operations. Existing
+obligations are unaffected and settle normally, because suspension stops intake and touches
+nothing that already exists.
+
+### Clock drift
+
+`SPIRE-1003` means `matchedAt` is more than 60 seconds from chain time. Fix NTP on the
+matcher. Do not fix it by backdating `matchedAt`, which turns a monitoring problem into a
+signature that will not verify.
+
+## Capacity
+
+| Limit | Value |
+| --- | --- |
+| Fills | 200 per second per venue |
+| Reads | 50 per second per venue |
+| Websocket connections | 8 per venue |
+
+The fills limit is per venue, not per member, so a venue clearing for many users shares one
+budget. If your matcher can burst above 200 per second, queue on your side rather than
+discovering `429` during a volatile minute.
+
+Reads are the limit people hit first, usually by polling `positions.get` per fill. Use the
+websocket and poll only as a fallback.
+
+## Before you go live
+
+- Alert routing for `margin.call` reaches a human in under four minutes, tested.
+- Limit check sits on the matching path, not on the settlement path.
+- `SPIRE-4001` is retried once, verified by sending a fill during finalisation on testnet.
+- Reconciliation runs every window and alerts on mismatch.
+- NTP is monitored, not merely configured.
+- Somebody who is not you can find this page at three in the morning.
